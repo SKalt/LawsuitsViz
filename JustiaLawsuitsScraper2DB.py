@@ -1,7 +1,9 @@
+# !/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
 Created on Sun Jul 10 10:03:32 2016
-
+Copyright 2016
+Offered under the Gnu Public Licence v3 (GPL3)
 @author: steven
 """
 
@@ -29,6 +31,18 @@ def create_db(cursor):
                     '1984-05-08',
                     '/florida/flmdce/8:1984cv00636/179585'))
 
+#def search_malformed_rows(cursor):
+#    # find non-datetime dates
+#    cursor.execute("SELECT * FROM Lawsuits WHERE dateFiled LIKE '%-%-%'")
+#    if cursor.fetchone() != None:
+#        print("Malformed date detected")
+#        return
+#    # find non-url urls
+#    cursor.execute("SELECT * FROM lawsuits WHERE url LIKE '/%/%/%/%'")
+#    if cursor.fetchone() != None:
+#        print("Malformed url detected")
+#        return
+
 def check_db_status(cursor):
     """
     Returns either the most recent date of a lawsuit filed in the db or
@@ -44,13 +58,18 @@ def check_db_status(cursor):
         create_db(cursor)
         return check_db_status(cursor)
     else:
-        query = "SELECT MAX(date(dateFiled)) FROM lawsuits"
+        query = "SELECT * FROM lawsuits"
         cursor.execute(query)
-        date = cursor.fetchone()[0]
+        if cursor.fetchone() == None:
+            # the lawsuits table is empty
+            cursor.execute("DROP TABLE lawsuits")
+            return check_db_status(cursor)
+        query = "SELECT MAX(date(dateFiled)) FROM lawsuits"
+        date = cursor.execute(query).fetchone()[0]
         query = "SELECT * FROM lawsuits WHERE dateFiled=?"
         cursor.execute(query, (date,))
         return cursor.fetchone()
-#%%
+
 def get_page(url):
     "Gets, parses a html page, returns an lxml etree object"
     page = HTTP.request('GET', url)
@@ -161,25 +180,25 @@ def get_case_details(page_tree, cutoff_date, cutoff_title):
             url       # a string)
     """
     output = []
-    cases_remaining()
+    get_justia_prog(page_tree)
     try:
         gen = (i for i in page_tree.xpath('//div[@id="search-results"]/div'))
     except AttributeError:
-        return (output, True)
+        return (output, False)
         # no more pages
     for div in gen:
         case = Case(div)
         if case.date == cutoff_date:
             if case.name == cutoff_title:
                 print("done")
-                return (output, True)
+                return (output, False)
             else:
                 pass
         if case.works:
             output.append((case.name, case.date, case.url))
         else:
-            raise ValueError("Case missing one or more properties")
-    return (output, False)
+            print("Case missing one or more properties")
+    return (output, True)
 
 def update_db(cutoff_date, cutoff_title):
     """
@@ -197,26 +216,38 @@ def update_db(cutoff_date, cutoff_title):
             title,      # a string
             url         # a string)
     """
-    page = get_page("https://dockets.justia.com/browse/noscat-10/nos-830?page=4830")
+    page = get_page("https://dockets.justia.com/browse/noscat-10/nos-830")
     more_left = True
     output = []
     while more_left:
         (output_tmp, more_left) = get_case_details(page, cutoff_date, cutoff_title)
         output += output_tmp
+        page = get_next_page(page)
     return output
 
-def get_justia_total():
+def get_justia_prog(page):
     """
-    Gets the total number of patent lawsuits in Justia
+    Gets, prints the total number of patent lawsuits in Justia, and the number
+    scraped.
+    Args:
+        page: a lxml.etree_ElementTree object representing the html of a
+        dockets.justia.com patent lawsuits page
     Returns:
         the integer total of patent lawsuit dockets in the justia database
     """
-    page = get_page("https://dockets.justia.com/browse/noscat-10/nos-830")
     texts = page.xpath("//div[@class='row-label extra']/text()")
+    global DB_TOTAL
     for i in texts:
         if 'cases' in i.lower():
-            number = int(i.strip().split('of')[1].replace(',', ''))
-            return number
+            i = i.strip().replace(',', '')
+            # reduce the total # of lawsuits with the number already in the db
+            justia_total = max([int(j) for j in i.split() if j.isnumeric()])
+            try:
+                print(i.replace(str(justia_total),
+                                str(justia_total - DB_TOTAL)))
+            except NameError:
+                DB_TOTAL = get_db_total(CURSOR)
+                get_justia_prog(page)
     if len(texts) < 1:
         print("Incorrect xpath? No text returned")
 
@@ -231,76 +262,58 @@ def get_db_total(cursor):
     cursor.execute("SELECT COUNT(*) FROM lawsuits")
     return cursor.fetchone()[0]
 
-def cases_remaining():
-    "maintains a count of cases remaining to parse"
-    global TOTAL
-    try:
-        TOTAL -= 10
-        print(TOTAL)
-    except NameError:
-        TOTAL = get_justia_total() - get_db_total(CURSOR)
-        cases_remaining()
 #%%
 if __name__ == '__main__':
     CONN = sqlite3.connect("patent_lawsuits.db")
     CURSOR = CONN.cursor()
     (PREV_NAME, PREV_DATE, PREV_URL) = check_db_status(CURSOR)
+    DB_TOTAL = get_db_total(CURSOR)
+    print("{} cases in local database".format(DB_TOTAL))    
     OUTPUT = update_db(PREV_DATE, PREV_NAME)
     CURSOR.executemany("INSERT INTO lawsuits VALUES (?,?,?)", OUTPUT)
     CONN.commit()
+    CONN.close()
 #%%
-#def get_case_details(page_tree,
-#                     cutoff_date,
-#                     cutoff_title,
-#                     cursor,
-#                     current_date=datetime.date.today()):
+#def get_justia_total():
 #    """
-#    Args:
-#        page_tree: a lxml.etree._ElementTree representing the html of
-#        a patent lawsuits page of dockets.justia.com
+#    Gets the total number of patent lawsuits in Justia
 #    Returns:
-#        A list of tuples of case details:
-#            (dateFiled, # in YYYY-MM-DD format
-#            title,      # a string
-#            url       # a string)
+#        the integer total of patent lawsuit dockets in the justia database
 #    """
-#    case_divs_xpath = '//div[@id="search-results"]/div'
-#    gen = (i for i in page_tree.xpath(case_divs_xpath))
-#    while True:
-#        try:
-#            div = next(gen)
-#        except StopIteration:
-#            page_tree = get_next_page(page_tree)
-#            gen = (i for i in page_tree.xpath(case_divs_xpath))
-#            div = next(gen)
-#        case = Case(div)
-#        current_date = case.date
-#        if current_date == cutoff_date:
-#            if case.name == cutoff_title:
-#                break
-#            else:
-#                pass
-#        if case.works:
-#            cursor.execute("INSERT INTO lawsuits VALUES (?,?,?)",
-#                           (case.name, case.date, case.url))
+#    page = get_page("https://dockets.justia.com/browse/noscat-10/nos-830")
+#    texts = page.xpath("//div[@class='row-label extra']/text()")
+#    for i in texts:
+#        if 'cases' in i.lower():
+#            number = int(i.strip().split('of')[1].replace(',', ''))
+#            return number
+#    if len(texts) < 1:
+#        print("Incorrect xpath? No text returned")
 #%%
+#def cases_remaining():
+#    "maintains a count of cases remaining to parse"
+#    global TOTAL
+#    try:
+#        TOTAL -= 10
+#        print(TOTAL)
+#    except NameError:
+#        TOTAL = get_justia_total() - get_db_total(CURSOR)
+#        cases_remaining()
 
-#%% Testing, to become final execution
-CONN = sqlite3.connect("patent_lawsuits.db")
-CURSOR = CONN.cursor()
-#%%
+##%% Testing, to become unit tests
+#CONN = sqlite3.connect("patent_lawsuits.db")
+#CURSOR = CONN.cursor()
+##%%
 #t = get_page("https://dockets.justia.com/browse/noscat-10/nos-830?page={}")
-#%%
-#%%
-CURSOR.execute("DROP TABLE lawsuits")
-#%%
-CURSOR.execute("SELECT * FROM sqlite_master WHERE type='table'")
-CURSOR.fetchall()
-#%%
-create_db(CURSOR)
-#%%
-CURSOR.execute("SELECT * FROM lawsuits")
-CURSOR.fetchone()
+##%%
+##%%
+#CURSOR.execute("DROP TABLE lawsuits")
+##%%
+#CURSOR.execute("SELECT * FROM sqlite_master WHERE type='table'")
+#CURSOR.fetchall()
+##%%
+#create_db(CURSOR)
+##%%
+#CURSOR.execute("SELECT * FROM lawsuits").fetchall()
 #%%
 #%%
 #def get_name(div):
